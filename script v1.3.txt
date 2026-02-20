@@ -1,0 +1,175 @@
+// ==UserScript==
+// @name         PSP BOT - Uji Coba (Versi Tampermonkey)
+// @namespace    http://tampermonkey.net/
+// @version      1.3
+// @description  Automasi Top Up PSP Admin (Pembaruan: Single Tab Queue)
+// @author       Fauzi
+// @match        https://psp-admin.teknologikartu.com/main/payment/transaction/top-up*
+// @grant        window.close
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Helper: Fungsi Delay (Jeda)
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+    // Helper: Tunggu elemen CSS muncul
+    async function waitForElement(selector, timeout = 5000) {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+            const el = document.querySelector(selector);
+            if (el) return el;
+            await sleep(100);
+        }
+        return null;
+    }
+
+    // Helper: Tunggu elemen XPath muncul
+    async function waitForXPath(xpath, timeout = 5000) {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+            const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+            if (result) return result;
+            await sleep(100);
+        }
+        return null;
+    }
+
+    // Helper: Input nilai khusus untuk form berbasis React
+    function setReactValue(element, value) {
+        const lastValue = element.value;
+        element.value = value;
+        const event = new Event('input', { bubbles: true });
+        const tracker = element._valueTracker;
+        if (tracker) {
+            tracker.setValue(lastValue);
+        }
+        element.dispatchEvent(event);
+    }
+
+    // Helper: Kirim status kembali ke tab Dashboard (HTML)
+    function kirimStatusKeDashboard(statusMsg, targetNis, errorMsg = "") {
+        if (window.opener) {
+            window.opener.postMessage({
+                type: 'BOT_STATUS',
+                status: statusMsg,
+                nis: targetNis,
+                message: errorMsg
+            }, '*');
+        } else {
+            console.log("Tidak ada window opener (dashboard). Status:", statusMsg, errorMsg);
+        }
+    }
+
+    async function runBot() {
+        console.log("Mulai menjalankan PSP BOT...");
+
+        // BACA PARAMETER URL
+        const urlParams = new URLSearchParams(window.location.search);
+
+        // Cek apakah mode auto diaktifkan oleh dashboard
+        if (urlParams.get('auto') !== 'true') {
+            console.log("Bot tidak dijalankan: Mode manual / akses langsung.");
+            return; // Hentikan script agar tidak mengganggu jika Anda buka web manual
+        }
+
+        const targetNama = urlParams.get('nama') || "";
+        const targetNis = urlParams.get('nis') || "";
+        const targetNominal = urlParams.get('nominal') || "";
+        const targetNote = urlParams.get('note') || "";
+
+        console.log(`Target Eksekusi -> Nama: ${targetNama}, NIS: ${targetNis}`);
+
+        // 1. Cek Pop up "Akun Ditangguhkan"
+        const modal = await waitForElement('.modal-dialog', 1000);
+        if (modal) {
+            console.log("Pop-up muncul, mencoba menutup...");
+            const closeBtn = document.querySelector('.modal-footer > div:nth-child(1) > button:nth-child(1)');
+            if (closeBtn) closeBtn.click();
+            await sleep(500);
+        }
+
+        // 2. Input Nama Santri
+        const namaInput = await waitForElement('#react-select-2-input');
+        if (namaInput) {
+            console.log("Input Nama Santri...");
+            namaInput.focus();
+
+            // MENGGUNAKAN DATA DARI PARAMETER URL
+            setReactValue(namaInput, targetNama);
+
+            await sleep(1000); // Tunggu dropdown muncul
+
+            // Simulasi tekan "Enter" untuk memilih opsi pertama dari dropdown
+            namaInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', keyCode: 13 }));
+        }
+
+        // 3. Delay 1 detik untuk loading data santri
+        await sleep(1000);
+
+        // 4. Cek Validasi NIS
+        const nisSelector = 'div.required:nth-child(3) > div:nth-child(1) > div:nth-child(2) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > div:nth-child(1)';
+        const nisEl = await waitForElement(nisSelector);
+
+        if (nisEl) {
+            const fullText = nisEl.innerText.trim();
+            const extractedNis = fullText.split('-').pop().trim();
+
+            if (extractedNis === targetNis) {
+                console.log("NIS Cocok! Melanjutkan isi form...");
+
+                // 5. Input Nominal
+                const nominalInput = await waitForElement('input#nominal');
+                if (nominalInput) {
+                    setReactValue(nominalInput, targetNominal);
+                    await sleep(50);
+                }
+
+                // 6. Input Keterangan (Note)
+                const noteInput = await waitForElement('input#note');
+                if (noteInput) {
+                    setReactValue(noteInput, targetNote);
+                    await sleep(50);
+                }
+
+                // 7. Klik Tombol Konfirmasi Utama
+                const btnConfirm = await waitForXPath('/html/body/div[1]/div[2]/div/div/div/div[2]/div/div/form/div[2]/button');
+                if (btnConfirm) {
+                    btnConfirm.click();
+                }
+
+                // 8. Tunggu Pop-up & Klik Tombol Konfirmasi Pop-up
+                await sleep(500);
+                const btnConfirmPopup = await waitForXPath('/html/body/div[3]/div/div[1]/div/div/div/div[3]/button[2]');
+                if (btnConfirmPopup) {
+                    btnConfirmPopup.click();
+                }
+
+                // 9. Cek Notifikasi Sukses / Gagal
+                const toast = await waitForElement('.Toastify__toast-body', 5000);
+                if (toast) {
+                    kirimStatusKeDashboard("SUKSES", targetNis, "Transaksi berhasil");
+                } else {
+                    kirimStatusKeDashboard("GAGAL", targetNis, "Tidak ada pop-up konfirmasi berhasil dari web");
+                }
+                await sleep(1500);
+
+            } else {
+                const errorMsg = `NIS Tidak Cocok. (Target: ${targetNis}, Web: ${extractedNis})`;
+                console.log(errorMsg);
+                kirimStatusKeDashboard("GAGAL", targetNis, errorMsg);
+            }
+        } else {
+             const errorMsg = "Elemen NIS tidak ditemukan di halaman.";
+             console.log(errorMsg);
+             kirimStatusKeDashboard("GAGAL", targetNis, errorMsg);
+        }
+    }
+
+    // Jalankan bot
+    window.addEventListener('load', () => {
+        setTimeout(runBot, 2000);
+    });
+
+})();
